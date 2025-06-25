@@ -11,16 +11,20 @@ load_dotenv()  # Load environment variables from .env
 def get_application() -> FastAPI:
     app = FastAPI(
         title="OBD2-Scanner",
-        description="OBD2-Scanner API",
+        description="OBD2-Scanner API with ELM327 support",
         version=os.getenv("API_VERSION", "1.0.0"),
     )
 
     # ── Routers ───────────────────────────────────────────────────────────────
     from api.manual import router as vin_router
     from api.routers.diagnostics import router as diag_router
+    from api.routers.scanner import router as scanner_router
+    from api.utils.LLM.llm import router as ask_llm_router
 
     app.include_router(vin_router, prefix="/api", tags=["VIN Decoder"])
     app.include_router(diag_router, prefix="/api", tags=["Diagnostics"])
+    app.include_router(scanner_router, prefix="/api", tags=["OBD2 Scanner"])
+    app.include_router(ask_llm_router, prefix="/api", tags=["Ask LLM"])
 
     # ── CORS middleware ───────────────────────────────────────────────────────
     allow_origins = os.getenv("CORS_ORIGINS", "*").split(",")
