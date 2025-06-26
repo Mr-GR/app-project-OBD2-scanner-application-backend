@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 import requests
 import os
 import re
@@ -7,9 +7,11 @@ import hashlib
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from sqlalchemy.orm import Session
 
 from api.schemas.chat import ChatRequest, ChatResponse, ChatMessage, DiagnosticContext
 from api.utils.dtc import get_code_description
+from db.database import get_db
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -265,13 +267,37 @@ Use proper markdown formatting with headers, lists, and emphasis."""
     return base_prompt + format_instructions
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat_with_context(request: ChatRequest):
-    """Enhanced chat endpoint with diagnostic context and hybrid classification"""
+async def chat_with_context(request: ChatRequest, db: Session = Depends(get_db)):
+    """Enhanced chat endpoint with automatic vehicle context"""
+    
+    # Get or create default user and check for primary vehicle
+    from api.routers.vehicles import get_or_create_default_user
+    from db.models import UserVehicle
+    
+    user = get_or_create_default_user(db)
+    primary_vehicle = db.query(UserVehicle).filter(
+        UserVehicle.user_id == user.id,
+        UserVehicle.is_primary == True
+    ).first()
+    
+    # Use provided context or auto-fill from primary vehicle
+    context_to_use = request.context
+    if not context_to_use and primary_vehicle:
+        # Auto-create context from primary vehicle
+        context_to_use = DiagnosticContext(
+            vin=primary_vehicle.vin,
+            vehicle_info={
+                "make": primary_vehicle.make or "Unknown",
+                "model": primary_vehicle.model or "Unknown", 
+                "year": str(primary_vehicle.year) if primary_vehicle.year else "Unknown",
+                "vehicle_type": primary_vehicle.vehicle_type or "Unknown"
+            }
+        )
     
     # Use hybrid classification system
     is_automotive, classification_method, processing_time = await hybrid_classification(
         request.message, 
-        request.context
+        context_to_use
     )
     
     # Log classification metrics
@@ -281,7 +307,9 @@ async def chat_with_context(request: ChatRequest):
         "is_automotive": is_automotive,
         "classification_method": classification_method,
         "processing_time_ms": round(processing_time * 1000, 2),
-        "has_context": request.context is not None,
+        "has_context": context_to_use is not None,
+        "has_primary_vehicle": primary_vehicle is not None,
+        "auto_context": request.context is None and primary_vehicle is not None,
         "level": request.level
     })
     
@@ -327,8 +355,10 @@ Please ask your question again and include your level (beginner or expert).""",
         return ChatResponse(message=message)
 
     try:
-        # Enhance context with VIN lookup if provided
-        enhanced_context = request.context
+        # Use the context we determined earlier (either provided or auto-generated from primary vehicle)
+        enhanced_context = context_to_use
+        
+        # If we have a VIN but no vehicle info, look it up
         if enhanced_context and enhanced_context.vin and not enhanced_context.vehicle_info:
             vehicle_info = get_vehicle_info_from_vin(enhanced_context.vin)
             if vehicle_info:
