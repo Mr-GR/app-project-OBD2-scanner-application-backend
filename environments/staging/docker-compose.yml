@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  postgres-staging:
+    image: postgres:15
+    container_name: obd2-postgres-staging
+    environment:
+      POSTGRES_DB: obd2_scanner_staging
+      POSTGRES_USER: obd2_staging_user
+      POSTGRES_PASSWORD: ${STAGING_DB_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - staging_postgres_data:/var/lib/postgresql/data
+      - ../../backups:/backups
+    restart: unless-stopped
+    networks:
+      - obd2-staging-network
+    
+  redis-staging:
+    image: redis:7-alpine
+    container_name: obd2-redis-staging
+    ports:
+      - "6380:6379"
+    volumes:
+      - staging_redis_data:/data
+    restart: unless-stopped
+    networks:
+      - obd2-staging-network
+
+  api-staging:
+    build: 
+      context: ../../
+      dockerfile: Dockerfile
+    container_name: obd2-api-staging
+    ports:
+      - "8081:8080"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://obd2_staging_user:${STAGING_DB_PASSWORD}@postgres-staging:5432/obd2_scanner_staging
+      - REDIS_URL=redis://redis-staging:6379
+    depends_on:
+      - postgres-staging
+      - redis-staging
+    restart: unless-stopped
+    networks:
+      - obd2-staging-network
+    volumes:
+      - ../../logs:/app/logs
+
+volumes:
+  staging_postgres_data:
+  staging_redis_data:
+
+networks:
+  obd2-staging-network:
+    driver: bridge

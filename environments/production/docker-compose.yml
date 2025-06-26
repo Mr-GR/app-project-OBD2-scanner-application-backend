@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  postgres-prod:
+    image: postgres:15
+    container_name: obd2-postgres-prod
+    environment:
+      POSTGRES_DB: obd2_scanner_prod
+      POSTGRES_USER: obd2_prod_user
+      POSTGRES_PASSWORD: ${PROD_DB_PASSWORD}
+    ports:
+      - "5434:5432"
+    volumes:
+      - prod_postgres_data:/var/lib/postgresql/data
+      - ../../backups:/backups
+      - ../../scripts/init-prod.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    networks:
+      - obd2-prod-network
+    command: |
+      postgres -c max_connections=200
+               -c shared_preload_libraries=pg_stat_statements
+               -c pg_stat_statements.track=all
+               -c pg_stat_statements.max=10000
+               -c log_statement=all
+               -c log_min_duration_statement=1000
+    
+  redis-prod:
+    image: redis:7-alpine
+    container_name: obd2-redis-prod
+    ports:
+      - "6381:6379"
+    volumes:
+      - prod_redis_data:/data
+      - ../../config/redis.conf:/usr/local/etc/redis/redis.conf
+    restart: unless-stopped
+    networks:
+      - obd2-prod-network
+    command: redis-server /usr/local/etc/redis/redis.conf
+
+  api-prod:
+    build: 
+      context: ../../
+      dockerfile: Dockerfile
+    container_name: obd2-api-prod
+    ports:
+      - "8082:8080"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://obd2_prod_user:${PROD_DB_PASSWORD}@postgres-prod:5432/obd2_scanner_prod
+      - REDIS_URL=redis://redis-prod:6379
+    depends_on:
+      - postgres-prod
+      - redis-prod
+    restart: unless-stopped
+    networks:
+      - obd2-prod-network
+    volumes:
+      - ../../logs:/app/logs
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  prod_postgres_data:
+  prod_redis_data:
+
+networks:
+  obd2-prod-network:
+    driver: bridge
