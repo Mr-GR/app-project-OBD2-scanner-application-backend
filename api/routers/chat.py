@@ -438,6 +438,140 @@ Please ask your question again and include your level (beginner or expert).""",
         )
         return ChatResponse(message=error_message)
 
+@router.post("/chat/quick", response_model=ChatResponse)
+async def quick_chat(request: ChatRequest, db: Session = Depends(get_db)):
+    """Quick chat endpoint for simple car queries without level requirement"""
+    
+    # Get or create default user and check for primary vehicle
+    from api.routers.vehicles import get_or_create_default_user
+    from db.models import UserVehicle
+    
+    user = get_or_create_default_user(db)
+    primary_vehicle = db.query(UserVehicle).filter(
+        UserVehicle.user_id == user.id,
+        UserVehicle.is_primary == True
+    ).first()
+    
+    # Use provided context or auto-fill from primary vehicle
+    context_to_use = request.context
+    if not context_to_use and primary_vehicle:
+        context_to_use = DiagnosticContext(
+            vin=primary_vehicle.vin,
+            vehicle_info={
+                "make": primary_vehicle.make or "Unknown",
+                "model": primary_vehicle.model or "Unknown", 
+                "year": str(primary_vehicle.year) if primary_vehicle.year else "Unknown",
+                "vehicle_type": primary_vehicle.vehicle_type or "Unknown"
+            }
+        )
+    
+    # Use hybrid classification system
+    is_automotive, classification_method, processing_time = await hybrid_classification(
+        request.message, 
+        context_to_use
+    )
+    
+    # Log classification metrics
+    logger.info({
+        "endpoint": "chat/quick",
+        "question_length": len(request.message),
+        "is_automotive": is_automotive,
+        "classification_method": classification_method,
+        "processing_time_ms": round(processing_time * 1000, 2),
+        "has_context": context_to_use is not None,
+        "has_primary_vehicle": primary_vehicle is not None
+    })
+    
+    if not is_automotive:
+        message = ChatMessage(
+            content=f"""I'm an automotive assistant that helps with car-related questions. Please ask me about:
+
+• Diagnostic trouble codes (P0420, B1234, etc.)
+• Engine and performance issues
+• Vehicle maintenance and repairs
+• OBD2 diagnostics
+• Check engine lights and warning indicators
+
+*Not automotive: {classification_method} ({round(processing_time * 1000, 2)}ms)*""",
+            format="markdown",
+            timestamp=datetime.now(),
+            message_type="assistant"
+        )
+        return ChatResponse(message=message)
+
+    try:
+        # Use beginner-friendly system prompt for quick responses
+        enhanced_context = context_to_use
+        
+        # If we have a VIN but no vehicle info, look it up
+        if enhanced_context and enhanced_context.vin and not enhanced_context.vehicle_info:
+            vehicle_info = get_vehicle_info_from_vin(enhanced_context.vin)
+            if vehicle_info:
+                enhanced_context.vehicle_info = vehicle_info
+
+        # Simple system prompt for quick responses
+        system_prompt = """You are a helpful automotive assistant. Provide clear, concise answers to car-related questions. Keep responses brief but informative. Use simple language and focus on practical advice."""
+        
+        if enhanced_context:
+            diagnostic_info = format_diagnostic_context(enhanced_context)
+            if diagnostic_info:
+                system_prompt += f"\n\nVehicle Context:\n{diagnostic_info}"
+        
+        # Create user prompt
+        user_prompt = f"Quick question: {request.message}"
+        
+        # Call LLM with shorter max tokens for quick responses
+        llm_response = requests.post(
+            "https://api.together.xyz/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {TOGETHER_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "mistralai/Mistral-7B-Instruct-v0.1",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 500  # Shorter responses for quick queries
+            }
+        )
+
+        result = llm_response.json()
+        answer = result["choices"][0]["message"]["content"]
+
+        # Create response message
+        message = ChatMessage(
+            content=answer,
+            format="markdown",
+            timestamp=datetime.now(),
+            message_type="assistant",
+            context=enhanced_context
+        )
+
+        # Generate simple suggestions for quick chat
+        suggestions = [
+            "Ask about symptoms",
+            "Check maintenance schedule", 
+            "Find related issues"
+        ]
+
+        return ChatResponse(
+            message=message,
+            suggestions=suggestions
+        )
+
+    except Exception as e:
+        logger.error(f"Quick chat endpoint error: {e}")
+        error_message = ChatMessage(
+            content=f"Sorry, I encountered an error: {str(e)}",
+            format="plain",
+            timestamp=datetime.now(),
+            message_type="error"
+        )
+        return ChatResponse(message=error_message)
+
 @router.get("/chat/stats")
 async def get_classification_stats():
     """Get classification system statistics for monitoring"""
