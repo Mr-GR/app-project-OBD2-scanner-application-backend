@@ -128,6 +128,31 @@ def test_chat_endpoints():
         print(f"❌ Chat endpoint with context error: {e}")
         results['chat_with_context'] = False
     
+    # Test quick chat endpoint
+    print("  ⚡ Testing /api/chat/quick endpoint...")
+    try:
+        quick_chat_payload = {
+            "message": "What does P0420 mean?"
+        }
+        
+        start_time = time.time()
+        response = requests.post(f"{BASE_URL}/api/chat/quick", json=quick_chat_payload)
+        response_time = (time.time() - start_time) * 1000
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"✅ Quick chat endpoint: {response_time:.0f}ms")
+            print(f"   Response length: {len(data['message']['content'])} characters")
+            print(f"   Format: {data['message']['format']}")
+            print(f"   Has suggestions: {len(data.get('suggestions', [])) > 0}")
+            results['chat_quick'] = True
+        else:
+            print(f"❌ Quick chat endpoint failed: {response.status_code}")
+            results['chat_quick'] = False
+    except Exception as e:
+        print(f"❌ Quick chat endpoint error: {e}")
+        results['chat_quick'] = False
+    
     # Test chat stats endpoint
     print("  📊 Testing /api/chat/stats endpoint...")
     try:
@@ -281,8 +306,8 @@ def test_scanner_endpoints():
     return results
 
 def test_performance_comparison():
-    """Compare performance between ask and chat endpoints"""
-    print("🏁 Performance comparison: /api/ask vs /api/chat...")
+    """Compare performance between ask, chat, and quick chat endpoints"""
+    print("🏁 Performance comparison: /api/ask vs /api/chat vs /api/chat/quick...")
     
     test_questions = [
         "P0420",
@@ -294,6 +319,7 @@ def test_performance_comparison():
     
     ask_times = []
     chat_times = []
+    quick_times = []
     
     for question in test_questions:
         # Test ask endpoint
@@ -320,19 +346,36 @@ def test_performance_comparison():
         except:
             pass
         
+        # Test quick chat endpoint
+        try:
+            start_time = time.time()
+            response = requests.post(f"{BASE_URL}/api/chat/quick", json={
+                "message": question
+            })
+            if response.status_code == 200:
+                quick_times.append((time.time() - start_time) * 1000)
+        except:
+            pass
+        
         time.sleep(0.1)  # Small delay between requests
     
-    if ask_times and chat_times:
+    if ask_times and chat_times and quick_times:
         avg_ask = sum(ask_times) / len(ask_times)
         avg_chat = sum(chat_times) / len(chat_times)
+        avg_quick = sum(quick_times) / len(quick_times)
         
         print(f"📊 Average response times:")
-        print(f"   /api/ask:  {avg_ask:.0f}ms")
-        print(f"   /api/chat: {avg_chat:.0f}ms")
+        print(f"   /api/ask:        {avg_ask:.0f}ms")
+        print(f"   /api/chat:       {avg_chat:.0f}ms")
+        print(f"   /api/chat/quick: {avg_quick:.0f}ms")
         
-        if avg_chat < avg_ask:
-            improvement = ((avg_ask - avg_chat) / avg_ask) * 100
-            print(f"🚀 Chat endpoint is {improvement:.1f}% faster!")
+        fastest = min(avg_ask, avg_chat, avg_quick)
+        if fastest == avg_quick:
+            print(f"🚀 Quick chat is the fastest!")
+        elif fastest == avg_chat:
+            print(f"🚀 Regular chat is the fastest!")
+        else:
+            print(f"🚀 Ask endpoint is the fastest!")
         
         return True
     else:
