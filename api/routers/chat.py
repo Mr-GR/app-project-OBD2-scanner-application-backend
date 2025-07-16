@@ -572,6 +572,103 @@ async def quick_chat(request: ChatRequest, db: Session = Depends(get_db)):
         )
         return ChatResponse(message=error_message)
 
+@router.post("/chat/analyze-vehicle")
+async def analyze_vehicle_diagnostics(request: dict):
+    """AI analysis endpoint for vehicle diagnostics data"""
+    try:
+        vehicle_data = request.get('vehicle_data', {})
+        live_data = vehicle_data.get('live_data', {})
+        trouble_codes = vehicle_data.get('trouble_codes', [])
+        connection_status = vehicle_data.get('connection_status', False)
+        device_name = vehicle_data.get('device_name', 'Unknown')
+        
+        # Build AI analysis prompt with VIN data
+        vin_info = ""
+        if live_data.get('vin'):
+            vin_info = f"VIN: {live_data.get('vin')}"
+            
+            # Try to get vehicle info from VIN
+            try:
+                vehicle_info = get_vehicle_info_from_vin(live_data.get('vin'))
+                if vehicle_info and vehicle_info.get('make', 'Unknown') != 'Unknown':
+                    vin_info += f"\nVehicle: {vehicle_info.get('year', '')} {vehicle_info.get('make', '')} {vehicle_info.get('model', '')}"
+            except Exception as e:
+                logger.warning(f"Could not get vehicle info from VIN: {e}")
+        
+        analysis_prompt = f"""You are a master automotive technician. Analyze this vehicle diagnostic data and provide detailed insights:
+
+CONNECTION STATUS: {"✅ Connected" if connection_status else "❌ Disconnected"} - Device: {device_name}
+
+{f"VEHICLE INFORMATION:\\n{vin_info}\\n" if vin_info else ""}
+LIVE DATA:
+- Engine RPM: {live_data.get('rpm', 'N/A')}
+- Vehicle Speed: {live_data.get('speed', 'N/A')} mph
+- Engine Temperature: {live_data.get('engine_temp', 'N/A')}°C
+- Fuel Level: {live_data.get('fuel_level', 'N/A')}%
+- Throttle Position: {live_data.get('throttle_position', 'N/A')}%
+
+TROUBLE CODES:
+{chr(10).join([f"- {code['code']}: {code['description']}" for code in trouble_codes]) if trouble_codes else "No active trouble codes detected"}
+
+Please provide a comprehensive analysis including:
+1. 🔍 Overall Vehicle Health Assessment
+2. ⚠️ Problem Analysis (if any issues found)
+3. 🔧 Recommended Actions
+4. 💡 Maintenance Suggestions
+5. 🚨 Priority Level (High/Medium/Low)
+
+{f"Consider the specific vehicle make/model when providing recommendations." if vin_info else ""}
+
+Format your response in markdown with clear sections and actionable advice."""
+
+        # Call LLM for analysis
+        if not TOGETHER_API_KEY:
+            return {
+                "response": "🤖 **AI Analysis Feature**\n\nAI analysis is currently unavailable. Please configure the TOGETHER_API_KEY environment variable to enable this feature.\n\n**Current Status:**\n- Connection: " + ("✅ Connected" if connection_status else "❌ Disconnected") + f"\n- Device: {device_name}\n- Live Data: {'Available' if live_data else 'No data'}\n- Trouble Codes: {len(trouble_codes)} active",
+                "status": "success"
+            }
+        
+        llm_response = requests.post(
+            "https://api.together.xyz/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {TOGETHER_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "mistralai/Mistral-7B-Instruct-v0.1",
+                "messages": [
+                    {"role": "system", "content": "You are a master automotive technician providing detailed vehicle diagnostics analysis."},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 1500
+            }
+        )
+        
+        result = llm_response.json()
+        ai_analysis = result["choices"][0]["message"]["content"]
+        
+        return {
+            "response": ai_analysis,
+            "status": "success",
+            "metadata": {
+                "connection_status": connection_status,
+                "device_name": device_name,
+                "live_data_points": len([v for v in live_data.values() if v is not None]),
+                "trouble_codes_count": len(trouble_codes),
+                "vin": live_data.get('vin'),
+                "has_vin": bool(live_data.get('vin')),
+                "analysis_timestamp": datetime.now().isoformat()
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Vehicle analysis error: {e}")
+        return {
+            "response": f"🔧 **Vehicle Analysis**\n\n❌ **Error**: Unable to analyze vehicle data at this time.\n\n**Details**: {str(e)}\n\n**Suggestion**: Please try again later or contact support if the issue persists.",
+            "status": "error"
+        }
+
 @router.get("/chat/stats")
 async def get_classification_stats():
     """Get classification system statistics for monitoring"""
