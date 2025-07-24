@@ -26,6 +26,15 @@ from api.schemas.scanner import (
     DTCListResponse,
     VehicleHealthResponse,
     ScannerStatusFlutterResponse,
+    FullDiagnosticScanRequest,
+    FullDiagnosticScanResponse,
+    UploadFullScanRequest,
+    UploadFullScanResponse,
+    TroubleCodeInfo,
+    ReadinessMonitor,
+    LiveParameter,
+    VehicleInformation,
+    FreezeFrameData,
 )
 
 logger = logging.getLogger(__name__)
@@ -1182,5 +1191,328 @@ async def get_vehicle_health_check():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get vehicle health check: {str(e)}"
+        )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Full Diagnostic Scan Endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/scanner/full-diagnostic-scan", response_model=FullDiagnosticScanResponse)
+async def perform_full_diagnostic_scan(request: FullDiagnosticScanRequest):
+    """Perform comprehensive diagnostic scan with all features"""
+    try:
+        if not scanner.connected:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Scanner not connected"
+            )
+        
+        import uuid
+        import time as time_module
+        
+        scan_start_time = time_module.time()
+        scan_id = str(uuid.uuid4())
+        
+        logger.info(f"Starting {request.scan_type} diagnostic scan {scan_id}")
+        
+        # Initialize response
+        response = FullDiagnosticScanResponse(
+            scan_id=scan_id,
+            scan_type=request.scan_type,
+            timestamp=datetime.now(),
+            status="partial"
+        )
+        
+        error_messages = []
+        
+        # 1. Get VIN if requested
+        if request.include_vin:
+            try:
+                vin = scanner.get_vin_from_obd2()
+                if vin:
+                    response.vehicle_info = VehicleInformation(vin=vin)
+                    logger.info(f"Retrieved VIN: {vin}")
+                else:
+                    error_messages.append("Could not retrieve VIN via OBD2")
+            except Exception as e:
+                error_messages.append(f"VIN retrieval failed: {str(e)}")
+        
+        # 2. Get all types of trouble codes
+        try:
+            # Active codes
+            active_codes = scanner.get_dtc_codes()
+            response.active_codes_count = len(active_codes)
+            
+            # Pending codes
+            pending_codes = scanner.get_pending_dtc_codes()
+            response.pending_codes_count = len(pending_codes)
+            
+            # Permanent codes
+            permanent_codes = scanner.get_permanent_dtc_codes()
+            response.permanent_codes_count = len(permanent_codes)
+            
+            # Process all codes
+            all_codes = []
+            for code in active_codes:
+                all_codes.append(TroubleCodeInfo(
+                    code=code,
+                    description=get_code_description(code),
+                    system=categorize_dtc(code),
+                    severity=get_dtc_severity(code),
+                    status="Active"
+                ))
+            
+            for code in pending_codes:
+                if code not in active_codes:  # Avoid duplicates
+                    all_codes.append(TroubleCodeInfo(
+                        code=code,
+                        description=get_code_description(code),
+                        system=categorize_dtc(code),
+                        severity=get_dtc_severity(code),
+                        status="Pending"
+                    ))
+            
+            for code in permanent_codes:
+                if code not in active_codes and code not in pending_codes:  # Avoid duplicates
+                    all_codes.append(TroubleCodeInfo(
+                        code=code,
+                        description=get_code_description(code),
+                        system=categorize_dtc(code),
+                        severity=get_dtc_severity(code),
+                        status="Permanent"
+                    ))
+            
+            response.trouble_codes = all_codes
+            logger.info(f"Found {len(all_codes)} total trouble codes")
+            
+        except Exception as e:
+            error_messages.append(f"Trouble code retrieval failed: {str(e)}")
+        
+        # 3. Get readiness monitors
+        try:
+            monitors_data = scanner.get_readiness_monitors()
+            readiness_monitors = []
+            ready_count = 0
+            not_ready_count = 0
+            
+            for monitor_name, status in monitors_data.items():
+                if monitor_name not in ["MIL", "DTC_Count"]:  # Skip non-monitor fields
+                    readiness_monitors.append(ReadinessMonitor(
+                        monitor_name=monitor_name,
+                        status=status
+                    ))
+                    if status == "Ready":
+                        ready_count += 1
+                    elif status == "Not Ready":
+                        not_ready_count += 1
+            
+            response.readiness_monitors = readiness_monitors
+            response.monitors_ready = ready_count
+            response.monitors_not_ready = not_ready_count
+            logger.info(f"Readiness monitors: {ready_count} ready, {not_ready_count} not ready")
+            
+        except Exception as e:
+            error_messages.append(f"Readiness monitor check failed: {str(e)}")
+        
+        # 4. Get live parameters if requested
+        if request.include_live_parameters:
+            try:
+                live_params = scanner.get_live_parameters(request.scan_type)
+                live_parameters = []
+                
+                for param_name, param_data in live_params.items():
+                    live_parameters.append(LiveParameter(
+                        name=param_name,
+                        value=param_data["value"],
+                        unit=param_data["unit"]
+                    ))
+                
+                response.live_parameters = live_parameters
+                logger.info(f"Retrieved {len(live_parameters)} live parameters")
+                
+            except Exception as e:
+                error_messages.append(f"Live parameters retrieval failed: {str(e)}")
+        
+        # 5. Get freeze frame data if requested
+        if request.include_freeze_frame and response.trouble_codes:
+            try:
+                freeze_frames = []
+                for trouble_code in response.trouble_codes[:3]:  # Limit to first 3 codes
+                    frame_data = scanner.get_freeze_frame_data(trouble_code.code)
+                    for frame in frame_data:
+                        freeze_frames.append(FreezeFrameData(
+                            dtc_code=frame["dtc_code"],
+                            frame_data={"raw_data": frame["data"]}
+                        ))
+                
+                response.freeze_frames = freeze_frames
+                logger.info(f"Retrieved {len(freeze_frames)} freeze frames")
+                
+            except Exception as e:
+                error_messages.append(f"Freeze frame retrieval failed: {str(e)}")
+        
+        # 6. Determine overall health
+        if response.trouble_codes:
+            critical_codes = [tc for tc in response.trouble_codes if tc.severity == "Critical"]
+            if critical_codes:
+                response.overall_health = "critical"
+            else:
+                response.overall_health = "warning"
+        else:
+            response.overall_health = "good"
+        
+        # 7. Finalize response
+        scan_duration = time_module.time() - scan_start_time
+        response.scan_duration = round(scan_duration, 2)
+        response.error_messages = error_messages
+        
+        if error_messages:
+            response.status = "partial"
+            logger.warning(f"Scan completed with errors: {error_messages}")
+        else:
+            response.status = "completed"
+            logger.info(f"Scan completed successfully in {scan_duration:.2f}s")
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error performing full diagnostic scan: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Full diagnostic scan failed: {str(e)}"
+        )
+
+@router.post("/scanner/upload-scan", response_model=UploadFullScanResponse)
+async def upload_full_scan(scan_data: UploadFullScanRequest):
+    """Upload full scan data from Flutter app to database"""
+    try:
+        from db.database import get_db
+        from db.models import ScanSession, ScanTroubleCode, ScanLiveParameter, ScanReadinessMonitor
+        from sqlalchemy.orm import Session
+        
+        # Get database session
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        
+        try:
+            # Validate vehicle_id exists or use None
+            from db.models import UserVehicle
+            if scan_data.vehicle_id:
+                existing_vehicle = db.query(UserVehicle).filter(UserVehicle.id == scan_data.vehicle_id).first()
+                if not existing_vehicle:
+                    # Use the first available vehicle or None
+                    first_vehicle = db.query(UserVehicle).first()
+                    vehicle_id = first_vehicle.id if first_vehicle else None
+                    logger.warning(f"Vehicle ID {scan_data.vehicle_id} not found, using {vehicle_id}")
+                else:
+                    vehicle_id = scan_data.vehicle_id
+            else:
+                vehicle_id = None
+            
+            # Create main scan session
+            scan_session = ScanSession(
+                vehicle_id=vehicle_id,
+                scan_type=scan_data.scan_type,
+                vehicle_info=scan_data.vehicle_info,
+                started_at=scan_data.started_at or datetime.now(),
+                completed_at=scan_data.completed_at or datetime.now()
+            )
+            db.add(scan_session)
+            db.flush()  # Get the ID
+            
+            # Add trouble codes
+            for code_data in scan_data.trouble_codes:
+                trouble_code = ScanTroubleCode(
+                    session_id=scan_session.id,
+                    code=code_data.code,
+                    description=code_data.description,
+                    system=code_data.system,
+                    code_type=code_data.type,
+                    severity=get_dtc_severity(code_data.code)
+                )
+                db.add(trouble_code)
+            
+            # Add live parameters
+            for param_name, param_value in scan_data.live_parameters.items():
+                live_param = ScanLiveParameter(
+                    session_id=scan_session.id,
+                    parameter_name=param_name,
+                    parameter_value=param_value
+                )
+                db.add(live_param)
+            
+            # Add readiness monitors
+            for monitor_name, status in scan_data.readiness_monitors.items():
+                readiness = ScanReadinessMonitor(
+                    session_id=scan_session.id,
+                    monitor_name=monitor_name,
+                    status=status
+                )
+                db.add(readiness)
+            
+            db.commit()
+            
+            logger.info(f"Uploaded scan data for vehicle {scan_data.vehicle_id}, session {scan_session.id}")
+            
+            return UploadFullScanResponse(
+                success=True,
+                scan_id=scan_session.id,
+                message="Full scan data uploaded successfully"
+            )
+            
+        except Exception as e:
+            db.rollback()
+            raise e
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error uploading scan data: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload scan data: {str(e)}"
+        )
+
+@router.get("/scanner/vehicles")
+async def get_available_vehicles():
+    """Get available vehicles for scan association"""
+    try:
+        from db.database import get_db
+        from db.models import UserVehicle
+        from sqlalchemy.orm import Session
+        
+        # Get database session
+        db_gen = get_db()
+        db: Session = next(db_gen)
+        
+        try:
+            vehicles = db.query(UserVehicle).limit(10).all()
+            vehicle_list = []
+            
+            for vehicle in vehicles:
+                vehicle_list.append({
+                    "id": vehicle.id,
+                    "make": vehicle.make,
+                    "model": vehicle.model,
+                    "year": vehicle.year,
+                    "vin": vehicle.vin,
+                    "is_primary": vehicle.is_primary
+                })
+            
+            return {
+                "vehicles": vehicle_list,
+                "count": len(vehicle_list)
+            }
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Error getting vehicles: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get vehicles: {str(e)}"
         )
 

@@ -791,4 +791,239 @@ class ELM327Scanner:
         """Send command with specified delay (for Bluetooth connections)"""
         response = self._send_command(command)
         time.sleep(delay)
-        return response 
+        return response
+    
+    # ===== Full Diagnostic Scan Methods =====
+    
+    def get_pending_dtc_codes(self) -> List[str]:
+        """Get pending DTC codes (Mode 07)"""
+        try:
+            response = self._send_command("07")
+            codes = []
+            
+            lines = response.split('\n')
+            for line in lines:
+                if "47" in line and len(line) > 10:  # Mode 7 response
+                    line_clean = line.strip()
+                    mode7_pos = line_clean.find("47")
+                    if mode7_pos >= 0:
+                        dtc_data = line_clean[mode7_pos + 2:]
+                        
+                        for i in range(0, len(dtc_data) - 3, 4):
+                            if i + 4 <= len(dtc_data):
+                                try:
+                                    first_byte = dtc_data[i:i+2]
+                                    second_byte = dtc_data[i+2:i+4]
+                                    
+                                    if first_byte == "00" and second_byte == "00":
+                                        break
+                                        
+                                    code = self._parse_dtc(first_byte, second_byte)
+                                    if code and code not in codes:
+                                        codes.append(code)
+                                except Exception as e:
+                                    logger.warning(f"Error parsing pending DTC: {e}")
+                                    continue
+                                    
+            logger.info(f"Found {len(codes)} pending DTC codes: {codes}")
+            return codes
+            
+        except Exception as e:
+            logger.error(f"Error getting pending DTC codes: {e}")
+            return []
+    
+    def get_permanent_dtc_codes(self) -> List[str]:
+        """Get permanent DTC codes (Mode 0A)"""
+        try:
+            response = self._send_command("0A")
+            codes = []
+            
+            lines = response.split('\n')
+            for line in lines:
+                if "4A" in line and len(line) > 10:  # Mode 0A response
+                    line_clean = line.strip()
+                    mode_pos = line_clean.find("4A")
+                    if mode_pos >= 0:
+                        dtc_data = line_clean[mode_pos + 2:]
+                        
+                        for i in range(0, len(dtc_data) - 3, 4):
+                            if i + 4 <= len(dtc_data):
+                                try:
+                                    first_byte = dtc_data[i:i+2]
+                                    second_byte = dtc_data[i+2:i+4]
+                                    
+                                    if first_byte == "00" and second_byte == "00":
+                                        break
+                                        
+                                    code = self._parse_dtc(first_byte, second_byte)
+                                    if code and code not in codes:
+                                        codes.append(code)
+                                except Exception as e:
+                                    logger.warning(f"Error parsing permanent DTC: {e}")
+                                    continue
+                                    
+            logger.info(f"Found {len(codes)} permanent DTC codes: {codes}")
+            return codes
+            
+        except Exception as e:
+            logger.error(f"Error getting permanent DTC codes: {e}")
+            return []
+    
+    def get_readiness_monitors(self) -> Dict[str, str]:
+        """Get readiness monitor status (Mode 01 PID 01)"""
+        try:
+            response = self._send_command("0101")
+            monitors = {}
+            
+            lines = response.split('\n')
+            for line in lines:
+                if "41 01" in line:
+                    # Parse readiness monitor data
+                    parts = line.strip().split()
+                    if len(parts) >= 6:
+                        # Extract the 4 bytes of monitor data
+                        byte_a = int(parts[2], 16) if len(parts) > 2 else 0
+                        byte_b = int(parts[3], 16) if len(parts) > 3 else 0
+                        byte_c = int(parts[4], 16) if len(parts) > 4 else 0
+                        byte_d = int(parts[5], 16) if len(parts) > 5 else 0
+                        
+                        # Decode readiness monitors
+                        monitors.update(self._decode_readiness_monitors(byte_a, byte_b, byte_c, byte_d))
+                        break
+            
+            logger.info(f"Readiness monitors: {monitors}")
+            return monitors
+            
+        except Exception as e:
+            logger.error(f"Error getting readiness monitors: {e}")
+            return {}
+    
+    def _decode_readiness_monitors(self, byte_a: int, byte_b: int, byte_c: int, byte_d: int) -> Dict[str, str]:
+        """Decode readiness monitor status from bytes"""
+        monitors = {}
+        
+        # Byte A - bit 7 is MIL status, bits 0-6 are number of DTCs
+        mil_on = (byte_a & 0x80) != 0
+        dtc_count = byte_a & 0x7F
+        
+        monitors["MIL"] = "On" if mil_on else "Off"
+        monitors["DTC_Count"] = str(dtc_count)
+        
+        # Byte B - Monitor support and completion status
+        # Bit definitions for gasoline vehicles
+        monitor_names = [
+            "Misfire", "Fuel System", "Components", "Reserved",
+            "Catalyst", "Heated Catalyst", "Evap System", "Secondary Air"
+        ]
+        
+        for i, name in enumerate(monitor_names):
+            if i < 8:
+                supported = (byte_b & (1 << i)) == 0  # Bit 0 = supported
+                complete = (byte_c & (1 << i)) == 0   # Bit 0 = complete
+                
+                if supported:
+                    monitors[name] = "Ready" if complete else "Not Ready"
+                else:
+                    monitors[name] = "Not Supported"
+        
+        return monitors
+    
+    def get_live_parameters(self, scan_type: str = "comprehensive") -> Dict[str, Any]:
+        """Get live parameters based on scan type"""
+        parameters = {}
+        
+        # Define PIDs based on scan type
+        if scan_type == "quick":
+            pids = ["010C", "010D", "0105", "010F"]  # RPM, Speed, Coolant temp, Intake temp
+        elif scan_type == "emissions":
+            pids = ["010C", "010D", "0105", "0106", "0107", "0108", "0109", "010A", "010B"]
+        else:  # comprehensive or custom
+            pids = [
+                "010C", "010D", "0105", "010F", "0111", "0104", "0106", "0107", 
+                "0108", "0109", "010A", "010B", "0110", "0114", "0115", "0142"
+            ]
+        
+        for pid in pids:
+            try:
+                sensor_data = self.get_sensor_data(pid)
+                if sensor_data:
+                    parameters[sensor_data.description] = {
+                        "value": sensor_data.value,
+                        "unit": sensor_data.unit,
+                        "pid": sensor_data.pid
+                    }
+                    time.sleep(0.1)  # Small delay between readings
+            except Exception as e:
+                logger.warning(f"Error reading PID {pid}: {e}")
+                continue
+        
+        return parameters
+    
+    def get_vin_from_obd2(self) -> Optional[str]:
+        """Get VIN using OBD2 command 0902"""
+        try:
+            response = self._send_command("0902")
+            
+            # Parse VIN from response
+            lines = response.split('\n')
+            vin_data = ""
+            
+            for line in lines:
+                if "49 02" in line:
+                    # Extract hex data after "49 02"
+                    parts = line.strip().split()
+                    if len(parts) > 2:
+                        # Skip "49 02" and get the data
+                        hex_data = ''.join(parts[2:])
+                        try:
+                            # Convert hex to ASCII
+                            vin_chars = bytes.fromhex(hex_data).decode('ascii', errors='ignore')
+                            vin_data += vin_chars
+                        except:
+                            continue
+            
+            # Clean and validate VIN
+            vin = ''.join(c for c in vin_data if c.isalnum()).strip()
+            if len(vin) >= 17:
+                vin = vin[:17]  # VIN is exactly 17 characters
+                logger.info(f"Retrieved VIN via OBD2: {vin}")
+                return vin
+            
+            logger.warning(f"Invalid VIN length: {len(vin)}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting VIN via OBD2: {e}")
+            return None
+    
+    def get_freeze_frame_data(self, dtc_code: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get freeze frame data (Mode 02)"""
+        try:
+            freeze_frames = []
+            
+            # If specific DTC provided, get its freeze frame
+            if dtc_code:
+                # Convert DTC to hex format for Mode 02
+                response = self._send_command("02")
+            else:
+                # Get all available freeze frames
+                response = self._send_command("02")
+            
+            # Parse freeze frame data
+            lines = response.split('\n')
+            for line in lines:
+                if "42" in line:  # Mode 2 response
+                    # Parse freeze frame data - this is complex and vehicle-specific
+                    # For now, return basic structure
+                    freeze_frame = {
+                        "dtc_code": dtc_code or "Unknown",
+                        "data": line.strip(),
+                        "raw_response": response
+                    }
+                    freeze_frames.append(freeze_frame)
+            
+            return freeze_frames
+            
+        except Exception as e:
+            logger.error(f"Error getting freeze frame data: {e}")
+            return [] 

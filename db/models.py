@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, JSON, Float
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from db.database import Base
@@ -53,6 +53,64 @@ class DiagnosticSession(Base):
     # Relationships
     user = relationship("User", back_populates="diagnostic_sessions")
     vehicle = relationship("UserVehicle", back_populates="diagnostic_sessions")
+
+# Full Diagnostic Scan Models
+class ScanSession(Base):
+    __tablename__ = "scan_sessions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    vehicle_id = Column(Integer, ForeignKey("user_vehicles.id"), nullable=True)
+    scan_type = Column(String(20))  # 'quick', 'comprehensive', 'emissions', 'custom'
+    status = Column(String(20), default='completed')
+    vehicle_info = Column(Text)
+    started_at = Column(DateTime(timezone=True), server_default=func.now())
+    completed_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    vehicle = relationship("UserVehicle")
+    trouble_codes = relationship("ScanTroubleCode", back_populates="session", cascade="all, delete-orphan")
+    live_parameters = relationship("ScanLiveParameter", back_populates="session", cascade="all, delete-orphan")
+    readiness_monitors = relationship("ScanReadinessMonitor", back_populates="session", cascade="all, delete-orphan")
+
+class ScanTroubleCode(Base):
+    __tablename__ = "scan_trouble_codes"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("scan_sessions.id"), nullable=False)
+    code = Column(String(10), nullable=False)
+    description = Column(Text)
+    system = Column(String(50))  # "Powertrain", "Body", "Chassis", "Network"
+    code_type = Column(String(20), default='active')  # 'active', 'pending', 'permanent'
+    severity = Column(String(20))  # "Critical", "Moderate", "Low"
+    
+    # Relationships
+    session = relationship("ScanSession", back_populates="trouble_codes")
+
+class ScanLiveParameter(Base):
+    __tablename__ = "scan_live_parameters"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("scan_sessions.id"), nullable=False)
+    parameter_name = Column(String(50), nullable=False)
+    parameter_value = Column(Text, nullable=False)
+    unit = Column(String(20))
+    min_value = Column(Float)
+    max_value = Column(Float)
+    
+    # Relationships
+    session = relationship("ScanSession", back_populates="live_parameters")
+
+class ScanReadinessMonitor(Base):
+    __tablename__ = "scan_readiness_monitors"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(Integer, ForeignKey("scan_sessions.id"), nullable=False)
+    monitor_name = Column(String(50), nullable=False)
+    status = Column(String(20), nullable=False)  # "Ready", "Not Ready", "Not Supported"
+    
+    # Relationships
+    session = relationship("ScanSession", back_populates="readiness_monitors")
 
 class ChatHistory(Base):
     __tablename__ = "chat_history"

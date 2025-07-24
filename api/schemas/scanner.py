@@ -146,4 +146,117 @@ class ScannerStatusFlutterResponse(BaseModel):
     device_name: Optional[str] = None
     battery_voltage: Optional[float] = None
 
+# Full Diagnostic Scan Schemas
+class FullDiagnosticScanRequest(BaseModel):
+    """Request for full diagnostic scan"""
+    scan_type: str = Field(description="Type of scan: 'quick', 'comprehensive', 'emissions', 'custom'")
+    vehicle_id: Optional[int] = Field(None, description="Vehicle ID for database storage")
+    custom_systems: Optional[List[str]] = Field(None, description="Custom systems to scan for 'custom' type")
+    include_vin: bool = Field(True, description="Include VIN retrieval")
+    include_live_parameters: bool = Field(True, description="Include live parameter data")
+    include_freeze_frame: bool = Field(True, description="Include freeze frame data")
+
+class TroubleCodeInfo(BaseModel):
+    """Enhanced trouble code information"""
+    code: str
+    description: str
+    system: str  # "Powertrain", "Body", "Chassis", "Network"
+    severity: str  # "Critical", "Moderate", "Low"
+    status: str  # "Active", "Pending", "Permanent"
+
+class ReadinessMonitor(BaseModel):
+    """Readiness monitor status"""
+    monitor_name: str
+    status: str  # "Ready", "Not Ready", "Not Supported"
+    
+class LiveParameter(BaseModel):
+    """Live parameter data"""
+    name: str
+    value: Optional[float]
+    unit: str
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    
+class FreezeFrameData(BaseModel):
+    """Freeze frame data snapshot"""
+    dtc_code: str
+    frame_data: Dict[str, Any]
+
+class VehicleInformation(BaseModel):
+    """Complete vehicle information"""
+    vin: Optional[str] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
+    year: Optional[str] = None
+    engine_type: Optional[str] = None
+    calibration_ids: List[str] = []
+
+class FullDiagnosticScanResponse(BaseModel):
+    """Complete diagnostic scan results"""
+    scan_id: str
+    scan_type: str
+    timestamp: datetime
+    status: str  # "completed", "failed", "partial"
+    
+    # Vehicle Information
+    vehicle_info: Optional[VehicleInformation] = None
+    
+    # Trouble Codes
+    trouble_codes: List[TroubleCodeInfo] = []
+    active_codes_count: int = 0
+    pending_codes_count: int = 0
+    permanent_codes_count: int = 0
+    
+    # Readiness Monitors
+    readiness_monitors: List[ReadinessMonitor] = []
+    monitors_ready: int = 0
+    monitors_not_ready: int = 0
+    
+    # Live Parameters
+    live_parameters: List[LiveParameter] = []
+    
+    # Freeze Frame Data
+    freeze_frames: List[FreezeFrameData] = []
+    
+    # Summary
+    overall_health: str = "unknown"  # "good", "warning", "critical"
+    scan_duration: Optional[float] = None
+    error_messages: List[str] = []
+
+# Upload scan data schemas (for Flutter app)
+class UploadScanTroubleCode(BaseModel):
+    """Trouble code for upload"""
+    code: str
+    description: str
+    system: str
+    type: str = "active"
+
+class UploadScanReadinessMonitor(BaseModel):
+    """Readiness monitor for upload"""
+    monitor_name: str
+    status: str
+
+class UploadScanLiveParameter(BaseModel):
+    """Live parameter for upload"""
+    parameter_name: str
+    parameter_value: str
+    unit: Optional[str] = None
+
+class UploadFullScanRequest(BaseModel):
+    """Request to upload full scan data from Flutter app"""
+    vehicle_id: int
+    scan_type: str  # 'quick', 'comprehensive', 'emissions', 'custom'
+    vehicle_info: Optional[str] = ""
+    trouble_codes: List[UploadScanTroubleCode] = []
+    live_parameters: Dict[str, str] = {}
+    readiness_monitors: Dict[str, str] = {}
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+class UploadFullScanResponse(BaseModel):
+    """Response for uploading full scan data"""
+    success: bool
+    scan_id: int
+    message: str
+
  
