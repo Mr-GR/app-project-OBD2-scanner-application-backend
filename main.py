@@ -21,12 +21,14 @@ def get_application() -> FastAPI:
     from api.routers.scanner import router as scanner_router
     from api.routers.chat import router as chat_router
     from api.routers.vehicles import router as vehicles_router
+    from api.routers.auth import router as auth_router
 
     app.include_router(vin_router, prefix="/api", tags=["VIN Decoder"])
     app.include_router(diag_router, prefix="/api", tags=["Diagnostics"])
     app.include_router(scanner_router, prefix="/api", tags=["OBD2 Scanner"])
     app.include_router(chat_router, prefix="/api", tags=["AI Chat"])
     app.include_router(vehicles_router, prefix="/api", tags=["Vehicle Management"])
+    app.include_router(auth_router, prefix="/api", tags=["Authentication"])
 
     # ── CORS middleware ───────────────────────────────────────────────────────
     allow_origins = os.getenv("CORS_ORIGINS", "*").split(",")

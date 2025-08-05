@@ -155,10 +155,29 @@ async def delete_vehicle(vehicle_id: int, db: Session = Depends(get_db)):
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
     
+    was_primary = vehicle.is_primary
+    
+    # Delete the vehicle
     db.delete(vehicle)
+    
+    # If we deleted the primary vehicle, optionally set another one as primary
+    # But this is optional - users can have no primary vehicle
+    if was_primary:
+        # Check if there are other vehicles
+        remaining_vehicles = db.query(UserVehicle).filter(UserVehicle.user_id == user.id).all()
+        if remaining_vehicles:
+            # Optionally make the first remaining vehicle primary
+            # Comment this out if you want users to manually select primary
+            # remaining_vehicles[0].is_primary = True
+            pass
+    
     db.commit()
     
-    return {"message": "Vehicle deleted successfully"}
+    return {
+        "message": "Vehicle deleted successfully",
+        "was_primary": was_primary,
+        "remaining_vehicles": db.query(UserVehicle).filter(UserVehicle.user_id == user.id).count()
+    }
 
 @router.put("/vehicles/{vehicle_id}/primary", response_model=VehicleResponse)
 async def set_primary_vehicle(vehicle_id: int, db: Session = Depends(get_db)):
@@ -197,22 +216,65 @@ async def get_primary_vehicle_info(db: Session = Depends(get_db)):
     """Get primary vehicle info for chat context"""
     
     user = get_or_create_default_user(db)
-    vehicle = db.query(UserVehicle).filter(
+    
+    # Get primary vehicle
+    primary_vehicle = db.query(UserVehicle).filter(
         UserVehicle.user_id == user.id,
         UserVehicle.is_primary == True
     ).first()
     
-    if not vehicle:
-        return {"has_primary_vehicle": False}
+    # Get total vehicle count
+    total_vehicles = db.query(UserVehicle).filter(UserVehicle.user_id == user.id).count()
+    
+    if not primary_vehicle:
+        return {
+            "has_primary_vehicle": False,
+            "total_vehicles": total_vehicles,
+            "message": "No primary vehicle set" if total_vehicles > 0 else "No vehicles registered"
+        }
     
     return {
         "has_primary_vehicle": True,
+        "total_vehicles": total_vehicles,
         "vehicle": {
-            "id": vehicle.id,
-            "vin": vehicle.vin,
-            "make": vehicle.make,
-            "model": vehicle.model,
-            "year": vehicle.year,
-            "vehicle_type": vehicle.vehicle_type
+            "id": primary_vehicle.id,
+            "vin": primary_vehicle.vin,
+            "make": primary_vehicle.make,
+            "model": primary_vehicle.model,
+            "year": primary_vehicle.year,
+            "vehicle_type": primary_vehicle.vehicle_type
         }
+    }
+
+@router.delete("/vehicles/primary")
+async def remove_primary_vehicle(db: Session = Depends(get_db)):
+    """Remove primary status from all vehicles (no primary vehicle)"""
+    
+    user = get_or_create_default_user(db)
+    
+    # Set all vehicles to non-primary
+    updated_count = db.query(UserVehicle).filter(UserVehicle.user_id == user.id).update({"is_primary": False})
+    db.commit()
+    
+    return {
+        "message": "Primary vehicle status removed from all vehicles",
+        "vehicles_updated": updated_count
+    }
+
+@router.delete("/vehicles/all")
+async def delete_all_vehicles(db: Session = Depends(get_db)):
+    """Delete all vehicles for the user"""
+    
+    user = get_or_create_default_user(db)
+    
+    # Count vehicles before deletion
+    vehicle_count = db.query(UserVehicle).filter(UserVehicle.user_id == user.id).count()
+    
+    # Delete all vehicles
+    db.query(UserVehicle).filter(UserVehicle.user_id == user.id).delete()
+    db.commit()
+    
+    return {
+        "message": f"All {vehicle_count} vehicles deleted successfully",
+        "deleted_count": vehicle_count
     }

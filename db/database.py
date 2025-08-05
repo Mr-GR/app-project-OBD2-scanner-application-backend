@@ -9,7 +9,7 @@ environment = os.getenv("ENVIRONMENT", "development")
 env_file = f"environments/{environment}/.env"
 
 if os.path.exists(env_file):
-    load_dotenv(env_file)
+    load_dotenv(env_file, override=True)  # Force override existing env vars
     print(f"📁 Loaded {environment} environment from {env_file}")
 else:
     load_dotenv()  # Fallback to root .env
@@ -18,8 +18,10 @@ else:
 # Database configuration
 DATABASE_URL = os.getenv(
     "DATABASE_URL", 
-    "postgresql://obd2_user:obd2_password@localhost:5432/obd2_scanner"
+    "postgresql://obd2_user:obd2_password@localhost:5432/obd2_scanner"  # Use localhost as fallback
 )
+
+print(f"🔍 Using DATABASE_URL: {DATABASE_URL}")
 
 # Create engine with connection pooling
 engine = create_engine(
