@@ -185,8 +185,8 @@ curl -X POST 'http://0.0.0.0:8080/api/scanner/manual-data' \
 
 ## API Docs
 
-- Swagger UI → [http://localhost:8080/docs](http://localhost:8080/docs)
-- Redoc → [http://localhost:8080/redoc](http://localhost:8080/redoc)
+- Swagger UI → [http://192.168.1.48:8080/docs](http://192.168.1.48:8080/docs)
+- Redoc → [http://192.168.1.48:8080/redoc](http://192.168.1.48:8080/redoc)
 
 ---
 

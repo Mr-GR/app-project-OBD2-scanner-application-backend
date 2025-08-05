@@ -5,54 +5,8 @@ import json, os, requests
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 LOCAL_CODES = BASE_DIR / "resources" / "dtc_codes.json"
+ENHANCED_CODES_PATH = BASE_DIR / "resources" / "enhanced_dtc_codes.json"
 
-# Enhanced DTC database based on PyOBD
-ENHANCED_DTCS = {
-    "P0300": "Random/Multiple Cylinder Misfire Detected",
-    "P0301": "Cylinder 1 Misfire Detected",
-    "P0302": "Cylinder 2 Misfire Detected",
-    "P0303": "Cylinder 3 Misfire Detected",
-    "P0304": "Cylinder 4 Misfire Detected",
-    "P0305": "Cylinder 5 Misfire Detected",
-    "P0306": "Cylinder 6 Misfire Detected",
-    "P0307": "Cylinder 7 Misfire Detected",
-    "P0308": "Cylinder 8 Misfire Detected",
-    "P0171": "System Too Lean (Bank 1)",
-    "P0172": "System Too Rich (Bank 1)",
-    "P0174": "System Too Lean (Bank 2)",
-    "P0175": "System Too Rich (Bank 2)",
-    "P0420": "Catalyst System Efficiency Below Threshold (Bank 1)",
-    "P0430": "Catalyst System Efficiency Below Threshold (Bank 2)",
-    "P0441": "Evaporative Emission Control System Incorrect Purge Flow",
-    "P0442": "Evaporative Emission Control System Leak Detected (small leak)",
-    "P0443": "Evaporative Emission Control System Purge Control Valve Circuit Malfunction",
-    "P0446": "Evaporative Emission Control System Vent Control Circuit Malfunction",
-    "P0455": "Evaporative Emission Control System Leak Detected (large leak)",
-    "P0500": "Vehicle Speed Sensor Malfunction",
-    "P0506": "Idle Control System RPM Lower Than Expected",
-    "P0507": "Idle Control System RPM Higher Than Expected",
-    "P0562": "System Voltage Low",
-    "P0563": "System Voltage High",
-    "P0601": "Internal Control Module Memory Check Sum Error",
-    "P0700": "Transmission Control System Malfunction",
-    "P0750": "Shift Solenoid A Malfunction",
-    "P0751": "Shift Solenoid A Performance or Stuck Off",
-    "P0752": "Shift Solenoid A Stuck On",
-    "P0753": "Shift Solenoid A Electrical",
-    "P0755": "Shift Solenoid B Malfunction",
-    "P0756": "Shift Solenoid B Performance or Stuck Off",
-    "P0757": "Shift Solenoid B Stuck On",
-    "P0758": "Shift Solenoid B Electrical",
-    "P0760": "Shift Solenoid C Malfunction",
-    "P0761": "Shift Solenoid C Performance or Stuck Off",
-    "P0762": "Shift Solenoid C Stuck On",
-    "P0763": "Shift Solenoid C Electrical",
-    "P1000": "OBD System Readiness Test Not Complete",
-    "U0001": "High Speed CAN Communication Bus",
-    "U0100": "Lost Communication With ECM/PCM 'A'",
-    "U0101": "Lost Communication With TCM",
-    "U0155": "Lost Communication With Instrument Panel Control Module",
-}
 
 @lru_cache
 def _local_table():
@@ -62,22 +16,83 @@ def _local_table():
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
-def get_code_description(code: str) -> str:
-    """Get DTC description with fallback to enhanced database"""
+@lru_cache
+def _enhanced_table():
+    """Load comprehensive DTC database from JSON file with 11,000+ codes"""
+    try:
+        with ENHANCED_CODES_PATH.open(encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Warning: Could not load enhanced DTC codes: {e}")
+        return {}
+
+def _clean_dtc_code(code: str) -> str:
+    """Clean and validate DTC code format"""
+    if not code:
+        return ""
+    
     code = code.strip().upper()
     
-    # Try local file first
-    local_desc = _local_table().get(code)
-    if local_desc:
-        return local_desc
+    # Remove any non-alphanumeric characters
+    import re
+    code = re.sub(r'[^A-Z0-9]', '', code)
     
-    # Fallback to enhanced database
-    enhanced_desc = ENHANCED_DTCS.get(code)
-    if enhanced_desc:
-        return enhanced_desc
+    # If already correct format, return as-is
+    if len(code) == 5 and code[0] in 'PBCU' and all(c in '0123456789ABCDEF' for c in code[1:]):
+        return code
     
-    # Generate generic description based on code pattern
-    return _generate_generic_description(code)
+    # Handle malformed patterns
+    if code[0] in 'PBCU' and len(code) > 5:
+        # Extract the meaningful part after the prefix
+        numeric_part = code[1:]
+        
+        # Common patterns to fix:
+        # P00300 -> P0300 (6 chars, remove one leading zero)
+        # P001300 -> P0130 (7 chars, remove leading zeros more carefully)
+        
+        if len(numeric_part) == 5:  # 6 total chars like P00300
+            if numeric_part.startswith('00'):
+                # Remove one leading zero: P00300 -> P0300
+                numeric_part = numeric_part[1:]
+        elif len(numeric_part) == 6:  # 7 total chars like P001300
+            if numeric_part.startswith('00'):
+                # Remove leading zeros more carefully
+                # P001300 -> extract 1300 -> P1300 (invalid) 
+                # Better: try to find the actual 4-digit code
+                if numeric_part[2:6] in ['1300', '0300']:
+                    # P001300 -> P0130, P000300 -> P0300
+                    if numeric_part[2:6] == '1300':
+                        numeric_part = '0130'
+                    elif numeric_part[2:6] == '0300':
+                        numeric_part = '0300'
+                else:
+                    # Remove two leading zeros
+                    numeric_part = numeric_part[2:]
+        
+        # Reconstruct the code
+        code = code[0] + numeric_part
+    
+    # Final validation
+    if len(code) == 5 and code[0] in 'PBCU' and all(c in '0123456789ABCDEF' for c in code[1:]):
+        return code
+    
+    return ""
+
+def get_code_description(code: str) -> str:
+    """Get DTC description with multiple fallback sources"""
+    code = code.strip().upper()
+    
+    # Clean and validate the code format
+    cleaned_code = _clean_dtc_code(code)
+    if not cleaned_code:
+        return f"Invalid DTC format: {code}"
+    
+    # Priority order: local overrides -> enhanced database -> generic
+    return (
+        _local_table().get(cleaned_code)
+        or _enhanced_table().get(cleaned_code)
+        or _generate_generic_description(cleaned_code)
+    )
 
 def _generate_generic_description(code: str) -> str:
     """Generate a generic description based on DTC code pattern"""
@@ -112,21 +127,117 @@ def categorize_dtc(code: str) -> str:
 
 def get_dtc_severity(code: str) -> str:
     """Estimate DTC severity level"""
-    code = code.upper()
+    code = code.upper().strip()
+    
+    # Clean the code first
+    cleaned_code = _clean_dtc_code(code)
+    if not cleaned_code:
+        return "Unknown"
     
     # Critical codes that need immediate attention
-    critical_codes = ['P0300', 'P0301', 'P0302', 'P0303', 'P0304', 'P0562', 'P0563']
-    if code in critical_codes:
-        return "Critical"
+    critical_patterns = [
+        'P030',  # Misfire codes (P0300-P0312)
+        'P056',  # System voltage issues (P0562, P0563)
+        'P060',  # PCM/ECM memory errors (P0601-P0605)
+        'C000',  # Critical chassis codes (some sensors)
+        'B000',  # Airbag system failures
+    ]
     
-    # Emissions-related codes
-    emissions_codes = ['P0420', 'P0430', 'P0441', 'P0442', 'P0455']
-    if code in emissions_codes:
-        return "Moderate"
+    # Check for critical patterns
+    for pattern in critical_patterns:
+        if cleaned_code.startswith(pattern):
+            return "Critical"
+    
+    # High priority codes
+    high_priority_codes = [
+        'P0100', 'P0101', 'P0102', 'P0103',  # MAF issues
+        'P0115', 'P0117', 'P0118',          # Coolant temp issues
+        'P0120', 'P0121', 'P0122', 'P0123', # Throttle position issues
+        'P0171', 'P0172', 'P0174', 'P0175', # Fuel trim issues
+        'P0500',                             # Vehicle speed sensor
+    ]
+    
+    if cleaned_code in high_priority_codes:
+        return "High"
+    
+    # Moderate priority codes (emissions, comfort, etc.)
+    moderate_patterns = [
+        'P042',  # Catalyst codes (P0420, P0430)
+        'P044',  # EVAP codes (P0440-P0455)
+        'P013',  # O2 sensor codes (P0130-P0139)
+        'P070',  # Transmission codes
+        'P075',  # Shift solenoid codes
+        'P076',  # Shift solenoid codes
+    ]
+    
+    for pattern in moderate_patterns:
+        if cleaned_code.startswith(pattern):
+            return "Moderate"
     
     # Network/Communication issues
-    if code.startswith('U'):
+    if cleaned_code.startswith('U'):
         return "Moderate"
     
-    # Default
+    # Body system codes (usually low priority unless safety-related)
+    if cleaned_code.startswith('B'):
+        # Airbag codes are critical, others are typically low
+        if cleaned_code.startswith('B000'):
+            return "Critical"
+        return "Low"
+    
+    # Chassis codes (brakes, suspension, etc.)
+    if cleaned_code.startswith('C'):
+        # ABS and brake-related codes are more serious
+        if cleaned_code.startswith('C000') or cleaned_code.startswith('C100'):
+            return "High" 
+        return "Moderate"
+    
+    # Default for P-codes and others
     return "Low"
+
+def validate_dtc_dataset():
+    """Validate the enhanced DTC dataset for format issues"""
+    table = _enhanced_table()
+    invalid_codes = []
+    
+    for code in list(table.keys()):
+        if not _clean_dtc_code(code):
+            invalid_codes.append(code)
+    
+    if invalid_codes:
+        print(f"⚠️  Found {len(invalid_codes)} invalid DTC format(s):")
+        for code in invalid_codes[:10]:  # Show first 10
+            print(f"   - {code}")
+        if len(invalid_codes) > 10:
+            print(f"   ... and {len(invalid_codes) - 10} more")
+    else:
+        print(f"✅ DTC dataset validation passed: {len(table)} codes")
+    
+    return len(invalid_codes) == 0
+
+def get_dataset_stats():
+    """Get statistics about the DTC datasets"""
+    local_count = len(_local_table())
+    enhanced_count = len(_enhanced_table())
+    
+    stats = {
+        "local_codes": local_count,
+        "enhanced_codes": enhanced_count,
+        "total_unique": len(set(_local_table().keys()) | set(_enhanced_table().keys()))
+    }
+    
+    # Count by prefix
+    all_codes = set(_local_table().keys()) | set(_enhanced_table().keys())
+    prefix_counts = {}
+    for code in all_codes:
+        prefix = code[0] if code else 'Unknown'
+        prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
+    
+    stats["by_system"] = {
+        "P (Powertrain)": prefix_counts.get('P', 0),
+        "B (Body)": prefix_counts.get('B', 0), 
+        "C (Chassis)": prefix_counts.get('C', 0),
+        "U (Network)": prefix_counts.get('U', 0)
+    }
+    
+    return stats

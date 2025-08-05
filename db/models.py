@@ -2,6 +2,8 @@ from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, Foreign
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from db.database import Base
+import secrets
+from datetime import datetime, timedelta, timezone
 
 class User(Base):
     __tablename__ = "users"
@@ -15,6 +17,7 @@ class User(Base):
     # Relationships
     vehicles = relationship("UserVehicle", back_populates="user")
     diagnostic_sessions = relationship("DiagnosticSession", back_populates="user")
+    magic_link_tokens = relationship("MagicLinkToken", back_populates="user")
 
 class UserVehicle(Base):
     __tablename__ = "user_vehicles"
@@ -133,3 +136,39 @@ class ChatHistory(Base):
     endpoint_used = Column(String(50))
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class MagicLinkToken(Base):
+    __tablename__ = "magic_link_tokens"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token = Column(String(255), unique=True, index=True, nullable=False)
+    email = Column(String(255), nullable=False)  # Store email for token validation
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    user = relationship("User", back_populates="magic_link_tokens")
+    
+    @classmethod
+    def generate_token(cls) -> str:
+        """Generate a secure random token"""
+        return secrets.token_urlsafe(32)
+    
+    @classmethod
+    def create_expires_at(cls) -> datetime:
+        """Create expiration time (15 minutes from now)"""
+        return datetime.now(timezone.utc) + timedelta(minutes=15)
+    
+    def is_expired(self) -> bool:
+        """Check if token is expired"""
+        current_time = datetime.now(timezone.utc)
+        # Handle both timezone-aware and timezone-naive datetimes
+        if self.expires_at.tzinfo is None:
+            current_time = current_time.replace(tzinfo=None)
+        return current_time > self.expires_at
+    
+    def is_used(self) -> bool:
+        """Check if token has been used"""
+        return self.used_at is not None

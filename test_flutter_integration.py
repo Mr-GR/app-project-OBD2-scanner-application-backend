@@ -11,8 +11,8 @@ from datetime import datetime
 from typing import Dict, Any
 
 # Configuration
-BASE_URL = "http://192.168.0.104:8080"  # Your Flutter app's expected URL
-# BASE_URL = "http://localhost:8080"  # For local testing
+BASE_URL = "http://localhost:8080"  # Your Flutter app's expected URL
+# BASE_URL = "http://192.168.1.48:8080"  # For network testing
 
 def test_scanner_status():
     """Test scanner status endpoint"""

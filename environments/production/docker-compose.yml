@@ -67,7 +67,7 @@ services:
           memory: 512M
           cpus: '0.25'
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      test: ["CMD", "curl", "-f", "http://192.168.1.48:8080/"]
       interval: 30s
       timeout: 10s
       retries: 3

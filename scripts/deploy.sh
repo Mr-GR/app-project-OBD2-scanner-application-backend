@@ -17,7 +17,7 @@ case $ENVIRONMENT in
     echo "🔧 Starting development server (native Python)..."
     echo "📋 Environment: $ENVIRONMENT"
     echo "🗄️  Database: Local PostgreSQL"
-    echo "🚀 Server will start on http://localhost:8080"
+    echo "🚀 Server will start on http://192.168.1.48:8080"
     cd "$PROJECT_ROOT"
     python main.py
     ;;
@@ -27,7 +27,7 @@ case $ENVIRONMENT in
     cd "$PROJECT_ROOT/environments/staging"
     echo "🐳 Starting staging containers..."
     docker-compose up -d
-    echo "✅ Staging deployed! API: http://localhost:8081"
+    echo "✅ Staging deployed! API: http://192.168.1.48:8081"
     ;;
     
   "production")
@@ -35,7 +35,7 @@ case $ENVIRONMENT in
     cd "$PROJECT_ROOT/environments/production"
     echo "🐳 Starting production containers..."
     docker-compose up -d
-    echo "✅ Production deployed! API: http://localhost:8082"
+    echo "✅ Production deployed! API: http://192.168.1.48:8082"
     ;;
     
   *)
