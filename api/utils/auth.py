@@ -47,8 +47,8 @@ class AuthUtils:
             )
     
     @staticmethod
-    def verify_jwt_token(token: str) -> Dict[str, Any]:
-        """Verify and decode JWT token"""
+    def verify_jwt_token(token: str, db_session=None) -> Dict[str, Any]:
+        """Verify and decode JWT token, checking blacklist if db_session provided"""
         try:
             payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
             
@@ -58,6 +58,15 @@ class AuthUtils:
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid token type"
                 )
+            
+            # Check if token is revoked (if database session provided)
+            if db_session:
+                from db.models import RevokedToken
+                if RevokedToken.is_token_revoked(db_session, token):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Token has been revoked"
+                    )
             
             return payload
             
@@ -91,8 +100,8 @@ def get_current_user(
         # Extract token from Bearer authorization
         token = credentials.credentials
         
-        # Verify token and get payload
-        payload = AuthUtils.verify_jwt_token(token)
+        # Verify token and get payload (with blacklist check)
+        payload = AuthUtils.verify_jwt_token(token, db)
         user_id = payload.get("user_id")
         
         if not user_id:

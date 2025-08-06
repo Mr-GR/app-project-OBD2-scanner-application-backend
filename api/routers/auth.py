@@ -2,13 +2,13 @@
 import logging
 from datetime import datetime, timezone
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status, Query, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
 from db.database import get_db
-from db.models import User, MagicLinkToken
+from db.models import User, MagicLinkToken, RevokedToken
 from api.schemas.auth import (
     MagicLinkRequest, 
     MagicLinkResponse, 
@@ -281,20 +281,71 @@ async def get_auth_status(
 
 @router.post("/auth/logout", response_model=LogoutResponse)
 async def logout(
-    current_user: User = Depends(get_current_user)
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     """
-    Logout current user
+    Logout current user and revoke JWT token
     
-    Note: With JWT tokens, logout is primarily handled on the client side
-    by removing the token. This endpoint is here for completeness and logging.
+    This endpoint:
+    1. Extracts the JWT token from Authorization header
+    2. Adds the token to the revoked tokens blacklist
+    3. Prevents further use of the token until it naturally expires
     """
-    logger.info(f"User logged out: {current_user.email}")
-    
-    return LogoutResponse(
-        success=True,
-        message="Logged out successfully"
-    )
+    try:
+        # Extract token from Authorization header
+        authorization = request.headers.get("Authorization")
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="No valid authorization header"
+            )
+        
+        token = authorization.split(" ")[1]
+        
+        # Decode token to get expiration time
+        from api.utils.auth import AuthUtils, JWT_SECRET_KEY
+        import jwt
+        try:
+            payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=["HS256"])
+            expires_at = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
+        except Exception:
+            # If we can't decode token, use a default expiration
+            from datetime import timedelta
+            expires_at = datetime.now(timezone.utc) + timedelta(hours=168)  # 7 days
+        
+        # Add token to revoked list
+        revoked_token = RevokedToken(
+            token_hash=RevokedToken.create_token_hash(token),
+            user_id=current_user.id,
+            expires_at=expires_at
+        )
+        
+        db.add(revoked_token)
+        try:
+            db.commit()
+            logger.info(f"User logged out and token revoked: {current_user.email}")
+        except IntegrityError:
+            # Token might already be revoked
+            db.rollback()
+            logger.info(f"User logged out (token already revoked): {current_user.email}")
+        
+        return LogoutResponse(
+            success=True,
+            message="Logged out successfully"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in logout: {e}")
+        db.rollback()
+        # Still return success to user, but log the error
+        return LogoutResponse(
+            success=True,
+            message="Logged out successfully"
+        )
 
 # Debug endpoint (remove in production)
 @router.get("/auth/debug/tokens")

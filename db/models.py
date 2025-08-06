@@ -1,8 +1,9 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, JSON, Float
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, JSON, Float, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from db.database import Base
 import secrets
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 class User(Base):
@@ -172,3 +173,35 @@ class MagicLinkToken(Base):
     def is_used(self) -> bool:
         """Check if token has been used"""
         return self.used_at is not None
+
+class RevokedToken(Base):
+    __tablename__ = "revoked_tokens"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    token_hash = Column(String(64), unique=True, index=True, nullable=False)  # SHA-256 hash of token
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)  # Original token expiration
+    
+    # Relationships
+    user = relationship("User")
+    
+    # Index for efficient cleanup of expired tokens
+    __table_args__ = (
+        Index('idx_revoked_tokens_expires_at', 'expires_at'),
+    )
+    
+    @classmethod
+    def create_token_hash(cls, token: str) -> str:
+        """Create SHA-256 hash of JWT token for storage"""
+        return hashlib.sha256(token.encode()).hexdigest()
+    
+    @classmethod
+    def is_token_revoked(cls, db_session, token: str) -> bool:
+        """Check if a token is in the revoked list"""
+        token_hash = cls.create_token_hash(token)
+        revoked_token = db_session.query(cls).filter(
+            cls.token_hash == token_hash,
+            cls.expires_at > datetime.now(timezone.utc)  # Only check non-expired entries
+        ).first()
+        return revoked_token is not None
