@@ -157,6 +157,12 @@ async def delete_vehicle(vehicle_id: int, db: Session = Depends(get_db)):
     
     was_primary = vehicle.is_primary
     
+    # Handle foreign key constraints: update chat conversations to null vehicle_id
+    from db.models import ChatConversation
+    db.query(ChatConversation).filter(ChatConversation.vehicle_id == vehicle_id).update({
+        ChatConversation.vehicle_id: None
+    })
+    
     # Delete the vehicle
     db.delete(vehicle)
     

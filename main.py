@@ -2,11 +2,13 @@
 
 import os
 import uvicorn  # type: ignore
-from fastapi import FastAPI  # type: ignore
+import logging
+from fastapi import FastAPI, Request  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from dotenv import load_dotenv  # type: ignore
 
 load_dotenv()  # Load environment variables from .env
+logger = logging.getLogger(__name__)
 
 def get_application() -> FastAPI:
     app = FastAPI(
@@ -23,12 +25,19 @@ def get_application() -> FastAPI:
     from api.routers.vehicles import router as vehicles_router
     from api.routers.auth import router as auth_router
 
-    app.include_router(vin_router, prefix="/api", tags=["VIN Decoder"])
-    app.include_router(diag_router, prefix="/api", tags=["Diagnostics"])
-    app.include_router(scanner_router, prefix="/api", tags=["OBD2 Scanner"])
-    app.include_router(chat_router, prefix="/api", tags=["AI Chat"])
-    app.include_router(vehicles_router, prefix="/api", tags=["Vehicle Management"])
-    app.include_router(auth_router, prefix="/api", tags=["Authentication"])
+    # ── Debug middleware to log request headers (BEFORE routers) ──────────────
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        # Log request details for debugging auth issues
+        if request.url.path.startswith("/api/chat"):
+            logger.info(f"Request to {request.method} {request.url.path}")
+            auth_header = request.headers.get("authorization")
+            logger.info(f"Authorization header: {'Present' if auth_header else 'Missing'}")
+            if auth_header:
+                logger.info(f"Auth header starts with Bearer: {auth_header.startswith('Bearer ')}")
+        
+        response = await call_next(request)
+        return response
 
     # ── CORS middleware ───────────────────────────────────────────────────────
     allow_origins = os.getenv("CORS_ORIGINS", "*").split(",")
@@ -39,6 +48,14 @@ def get_application() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ── Routers ───────────────────────────────────────────────────────────────
+    app.include_router(vin_router, prefix="/api", tags=["VIN Decoder"])
+    app.include_router(diag_router, prefix="/api", tags=["Diagnostics"])
+    app.include_router(scanner_router, prefix="/api", tags=["OBD2 Scanner"])
+    app.include_router(chat_router, prefix="/api", tags=["AI Chat"])
+    app.include_router(vehicles_router, prefix="/api", tags=["Vehicle Management"])
+    app.include_router(auth_router, prefix="/api", tags=["Authentication"])
 
     # ── Health check ─────────────────────────────────────────────────────────
     @app.get("/", tags=["Health"])

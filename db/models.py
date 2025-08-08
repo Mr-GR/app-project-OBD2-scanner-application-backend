@@ -1,8 +1,9 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, JSON, Float
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Text, ForeignKey, JSON, Float, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from db.database import Base
 import secrets
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 class User(Base):
@@ -125,7 +126,7 @@ class ChatHistory(Base):
     # Chat data
     message = Column(Text, nullable=False)
     response = Column(Text, nullable=False)
-    level = Column(String(20))  # "beginner" or "expert"
+    # level = Column(String(20))  # DEPRECATED: Removed in favor of context-based responses
     
     # Context used
     context_data = Column(JSON)  # Store the context that was used
@@ -136,6 +137,50 @@ class ChatHistory(Base):
     endpoint_used = Column(String(50))
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class ChatConversation(Base):
+    __tablename__ = "chat_conversations"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    vehicle_id = Column(Integer, ForeignKey("user_vehicles.id"), nullable=True)
+    
+    # Conversation metadata
+    title = Column(String(255), nullable=False)
+    # experience_level = Column(String(20))  # DEPRECATED: Removed in favor of context-based responses
+    
+    # Context for the conversation
+    context_data = Column(JSON)  # Store DiagnosticContext data
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    user = relationship("User")
+    vehicle = relationship("UserVehicle") 
+    messages = relationship("ChatMessage", back_populates="conversation", cascade="all, delete-orphan")
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("chat_conversations.id"), nullable=False)
+    
+    # Message data
+    content = Column(Text, nullable=False)
+    message_type = Column(String(20), nullable=False)  # "user", "assistant", "diagnostic", "error"
+    format_type = Column(String(20), default="markdown")  # "markdown", "plain"
+    
+    # Context and metadata
+    context_data = Column(JSON)  # DiagnosticContext for this specific message
+    suggestions = Column(JSON)  # List of suggestions for user
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    conversation = relationship("ChatConversation", back_populates="messages")
 
 class MagicLinkToken(Base):
     __tablename__ = "magic_link_tokens"
@@ -172,3 +217,60 @@ class MagicLinkToken(Base):
     def is_used(self) -> bool:
         """Check if token has been used"""
         return self.used_at is not None
+
+class RevokedToken(Base):
+    __tablename__ = "revoked_tokens"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    token_hash = Column(String(64), unique=True, index=True, nullable=False)  # SHA-256 hash of token
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)  # Original token expiration
+    
+    # Relationships
+    user = relationship("User")
+    
+    # Index for efficient cleanup of expired tokens
+    __table_args__ = (
+        Index('idx_revoked_tokens_expires_at', 'expires_at'),
+    )
+    
+    @classmethod
+    def create_token_hash(cls, token: str) -> str:
+        """Create SHA-256 hash of JWT token for storage"""
+        return hashlib.sha256(token.encode()).hexdigest()
+    
+    @classmethod
+    def is_token_revoked(cls, db_session, token: str) -> bool:
+        """Check if a token is in the revoked list"""
+        token_hash = cls.create_token_hash(token)
+        revoked_token = db_session.query(cls).filter(
+            cls.token_hash == token_hash,
+            cls.expires_at > datetime.now(timezone.utc)  # Only check non-expired entries
+        ).first()
+        return revoked_token is not None
+
+class DiagnosticOrchestrationSession(Base):
+    __tablename__ = "diagnostic_orchestration_sessions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(255), unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    vehicle_id = Column(Integer, ForeignKey("user_vehicles.id"), nullable=True)
+    
+    # Session state
+    current_state = Column(String(50), default="planning")
+    
+    # Context data
+    vehicle_snapshot = Column(JSON)  # VehicleSnapshot data
+    live_telemetry = Column(JSON)    # Array of LiveTelemetry data
+    hypotheses = Column(JSON)        # Array of DiagnosticHypothesis data
+    execution_history = Column(JSON) # Array of execution records
+    
+    # Metadata
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    user = relationship("User")
+    vehicle = relationship("UserVehicle")

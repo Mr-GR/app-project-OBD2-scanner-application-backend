@@ -10,7 +10,6 @@ class DiagnosticContext(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
-    level: Optional[Literal["beginner", "expert"]] = None
     context: Optional[DiagnosticContext] = None
     include_diagnostics: bool = False
 
@@ -25,3 +24,44 @@ class ChatResponse(BaseModel):
     message: ChatMessage
     diagnostic_data: Optional[Dict[str, Any]] = None
     suggestions: Optional[List[str]] = None
+
+# Chat Persistence Schemas
+class ConversationCreate(BaseModel):
+    title: str
+    context: Optional[DiagnosticContext] = None
+
+class ConversationUpdate(BaseModel):
+    title: Optional[str] = None
+
+class MessageCreate(BaseModel):
+    content: str
+    message_type: Literal["user", "assistant", "diagnostic", "error"]
+    format: Literal["markdown", "plain"] = "markdown"
+    context: Optional[DiagnosticContext] = None
+    suggestions: Optional[List[str]] = None
+
+class MessageResponse(BaseModel):
+    id: int
+    conversation_id: int
+    content: str
+    message_type: str
+    format: str
+    context: Optional[DiagnosticContext] = None
+    suggestions: Optional[List[str]] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class ConversationResponse(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    vehicle_id: Optional[int] = None
+    title: str
+    context: Optional[DiagnosticContext] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    messages: Optional[List[MessageResponse]] = None
+
+    class Config:
+        from_attributes = True
