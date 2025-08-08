@@ -126,7 +126,7 @@ class ChatHistory(Base):
     # Chat data
     message = Column(Text, nullable=False)
     response = Column(Text, nullable=False)
-    level = Column(String(20))  # "beginner" or "expert"
+    # level = Column(String(20))  # DEPRECATED: Removed in favor of context-based responses
     
     # Context used
     context_data = Column(JSON)  # Store the context that was used
@@ -137,6 +137,50 @@ class ChatHistory(Base):
     endpoint_used = Column(String(50))
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class ChatConversation(Base):
+    __tablename__ = "chat_conversations"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    vehicle_id = Column(Integer, ForeignKey("user_vehicles.id"), nullable=True)
+    
+    # Conversation metadata
+    title = Column(String(255), nullable=False)
+    # experience_level = Column(String(20))  # DEPRECATED: Removed in favor of context-based responses
+    
+    # Context for the conversation
+    context_data = Column(JSON)  # Store DiagnosticContext data
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    user = relationship("User")
+    vehicle = relationship("UserVehicle") 
+    messages = relationship("ChatMessage", back_populates="conversation", cascade="all, delete-orphan")
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    conversation_id = Column(Integer, ForeignKey("chat_conversations.id"), nullable=False)
+    
+    # Message data
+    content = Column(Text, nullable=False)
+    message_type = Column(String(20), nullable=False)  # "user", "assistant", "diagnostic", "error"
+    format_type = Column(String(20), default="markdown")  # "markdown", "plain"
+    
+    # Context and metadata
+    context_data = Column(JSON)  # DiagnosticContext for this specific message
+    suggestions = Column(JSON)  # List of suggestions for user
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    # Relationships
+    conversation = relationship("ChatConversation", back_populates="messages")
 
 class MagicLinkToken(Base):
     __tablename__ = "magic_link_tokens"
@@ -205,3 +249,28 @@ class RevokedToken(Base):
             cls.expires_at > datetime.now(timezone.utc)  # Only check non-expired entries
         ).first()
         return revoked_token is not None
+
+class DiagnosticOrchestrationSession(Base):
+    __tablename__ = "diagnostic_orchestration_sessions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(255), unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    vehicle_id = Column(Integer, ForeignKey("user_vehicles.id"), nullable=True)
+    
+    # Session state
+    current_state = Column(String(50), default="planning")
+    
+    # Context data
+    vehicle_snapshot = Column(JSON)  # VehicleSnapshot data
+    live_telemetry = Column(JSON)    # Array of LiveTelemetry data
+    hypotheses = Column(JSON)        # Array of DiagnosticHypothesis data
+    execution_history = Column(JSON) # Array of execution records
+    
+    # Metadata
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    user = relationship("User")
+    vehicle = relationship("UserVehicle")

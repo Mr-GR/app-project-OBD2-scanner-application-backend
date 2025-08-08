@@ -5,13 +5,23 @@ import re
 import time
 import hashlib
 import logging
+import traceback
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
 
-from api.schemas.chat import ChatRequest, ChatResponse, ChatMessage, DiagnosticContext
+from api.schemas.chat import (
+    ChatRequest, ChatResponse, ChatMessage, DiagnosticContext,
+    ConversationCreate, ConversationUpdate, MessageCreate,
+    MessageResponse, ConversationResponse
+)
 from api.utils.dtc import get_code_description
+from api.utils.auth import get_current_user
+from api.utils.orchestrator import DiagnosticOrchestrator
 from db.database import get_db
+from db.models import User
+import uuid
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -223,11 +233,11 @@ def get_vehicle_info_from_vin(vin: str) -> Dict[str, str]:
     except Exception:
         return {}
 
-def generate_enhanced_system_prompt(level: str, context: DiagnosticContext = None) -> str:
+def generate_enhanced_system_prompt(context: DiagnosticContext = None) -> str:
     """Generate system prompt with diagnostic context"""
-    base_prompt = f"""You are a master mechanic with decades of experience working on all types of vehicles. You ONLY answer mechanical and automotive questions.
+    base_prompt = """You are a master mechanic with decades of experience working on all types of vehicles. You ONLY answer mechanical and automotive questions.
 
-You are speaking to a {"BEGINNER" if level == "beginner" else "EXPERT"}. {"Use simple language, explain technical terms, and focus on basic steps they can safely perform. Always prioritize safety and recommend professional help for complex tasks." if level == "beginner" else "Provide detailed technical information, specific torque specs, advanced diagnostic procedures, and comprehensive troubleshooting steps."}"""
+Provide clear, helpful explanations that are informative yet accessible. Explain technical terms when needed, focus on practical steps, and always prioritize safety by recommending professional help for complex or dangerous tasks."""
 
     if context:
         diagnostic_info = format_diagnostic_context(context)
@@ -248,35 +258,32 @@ Always structure your responses in proper markdown format:
 ## Current Issue Analysis
 [Analysis of the problem based on provided context]
 
-## """ + ("What This Means" if level == "beginner" else "Technical Diagnosis") + """
-[Explanation appropriate for """ + level + """ level]
+## What This Means
+[Clear explanation of the issue and its implications]
 
-## """ + ("Basic Steps You Can Try" if level == "beginner" else "Advanced Troubleshooting Steps") + """
+## Troubleshooting Steps
 1. [Step with clear explanation]
 2. [Another step]
 3. [Continue with steps]
 
-## """ + ("Important Safety Warnings" if level == "beginner" else "Technical Specifications") + """
-[Safety information or technical specs]
+## Important Safety Information
+[Safety warnings and precautions]
 
-## """ + ("Get Professional Help If" if level == "beginner" else "Professional Considerations") + """
-[When to seek professional assistance]
+## When to Seek Professional Help
+[When to contact a mechanic or professional service]
 
 Use proper markdown formatting with headers, lists, and emphasis."""
 
     return base_prompt + format_instructions
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat_with_context(request: ChatRequest, db: Session = Depends(get_db)):
+async def chat_with_context(request: ChatRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Enhanced chat endpoint with automatic vehicle context"""
     
-    # Get or create default user and check for primary vehicle
-    from api.routers.vehicles import get_or_create_default_user
+    # Get primary vehicle for current user
     from db.models import UserVehicle
-    
-    user = get_or_create_default_user(db)
     primary_vehicle = db.query(UserVehicle).filter(
-        UserVehicle.user_id == user.id,
+        UserVehicle.user_id == current_user.id,
         UserVehicle.is_primary == True
     ).first()
     
@@ -310,7 +317,7 @@ async def chat_with_context(request: ChatRequest, db: Session = Depends(get_db))
         "has_context": context_to_use is not None,
         "has_primary_vehicle": primary_vehicle is not None,
         "auto_context": request.context is None and primary_vehicle is not None,
-        "level": request.level
+        "level": "context_based"
     })
     
     if not is_automotive:
@@ -335,25 +342,6 @@ Please ask me questions related to car repairs, diagnostics, or vehicle maintena
         )
         return ChatResponse(message=message)
     
-    if request.level is None:
-        message = ChatMessage(
-            content="""# Experience Level Required
-
-Before I provide mechanical advice, please specify your experience level:
-
-## **BEGINNER**
-New to car maintenance, prefer simple explanations and basic steps
-
-## **EXPERT** 
-Experienced with automotive work, want detailed technical information
-
-Please ask your question again and include your level (beginner or expert).""",
-            format="markdown",
-            timestamp=datetime.now(),
-            message_type="assistant"
-        )
-        return ChatResponse(message=message)
-
     try:
         # Use the context we determined earlier (either provided or auto-generated from primary vehicle)
         enhanced_context = context_to_use
@@ -365,10 +353,10 @@ Please ask your question again and include your level (beginner or expert).""",
                 enhanced_context.vehicle_info = vehicle_info
 
         # Generate system prompt with context
-        system_prompt = generate_enhanced_system_prompt(request.level, enhanced_context)
+        system_prompt = generate_enhanced_system_prompt(enhanced_context)
         
         # Create user prompt
-        user_prompt = f"Question: {request.message} ({request.level} level)"
+        user_prompt = f"Question: {request.message}"
         
         # Call LLM
         llm_response = requests.post(
@@ -439,16 +427,13 @@ Please ask your question again and include your level (beginner or expert).""",
         return ChatResponse(message=error_message)
 
 @router.post("/chat/quick", response_model=ChatResponse)
-async def quick_chat(request: ChatRequest, db: Session = Depends(get_db)):
+async def quick_chat(request: ChatRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """Quick chat endpoint for simple car queries without level requirement"""
     
-    # Get or create default user and check for primary vehicle
-    from api.routers.vehicles import get_or_create_default_user
+    # Get primary vehicle for current user
     from db.models import UserVehicle
-    
-    user = get_or_create_default_user(db)
     primary_vehicle = db.query(UserVehicle).filter(
-        UserVehicle.user_id == user.id,
+        UserVehicle.user_id == current_user.id,
         UserVehicle.is_primary == True
     ).first()
     
@@ -701,3 +686,408 @@ async def get_classification_stats():
             "cache_enabled": True
         }
     }
+
+# Chat Persistence Endpoints
+@router.post("/chat/conversations", response_model=ConversationResponse)
+async def create_conversation(conversation: ConversationCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Create a new chat conversation"""
+    from db.models import ChatConversation, UserVehicle
+    
+    try:
+        
+        # Get primary vehicle if available
+        primary_vehicle = db.query(UserVehicle).filter(
+            UserVehicle.user_id == current_user.id,
+            UserVehicle.is_primary == True
+        ).first()
+        
+        # Create conversation
+        db_conversation = ChatConversation(
+            user_id=current_user.id,
+            vehicle_id=primary_vehicle.id if primary_vehicle else None,
+            title=conversation.title,
+            context_data=conversation.context.dict() if conversation.context else None
+        )
+        
+        db.add(db_conversation)
+        db.commit()
+        db.refresh(db_conversation)
+        
+        return ConversationResponse(
+            id=db_conversation.id,
+            user_id=db_conversation.user_id,
+            vehicle_id=db_conversation.vehicle_id,
+            title=db_conversation.title,
+            context=DiagnosticContext(**db_conversation.context_data) if db_conversation.context_data else None,
+            created_at=db_conversation.created_at,
+            updated_at=db_conversation.updated_at
+        )
+        
+    except Exception as e:
+        logger.error(f"Create conversation error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create conversation")
+
+@router.get("/chat/conversations", response_model=List[ConversationResponse])
+async def get_conversations(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Get all conversations for the user"""
+    from db.models import ChatConversation
+    
+    try:
+        
+        conversations = db.query(ChatConversation).filter(
+            ChatConversation.user_id == current_user.id
+        ).order_by(ChatConversation.updated_at.desc()).all()
+        
+        result = []
+        for conv in conversations:
+            result.append(ConversationResponse(
+                id=conv.id,
+                user_id=conv.user_id,
+                vehicle_id=conv.vehicle_id,
+                title=conv.title,
+                context=DiagnosticContext(**conv.context_data) if conv.context_data else None,
+                created_at=conv.created_at,
+                updated_at=conv.updated_at
+            ))
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Get conversations error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get conversations")
+
+@router.get("/chat/conversations/{conversation_id}", response_model=ConversationResponse)
+async def get_conversation(conversation_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Get a specific conversation with its messages"""
+    from db.models import ChatConversation, ChatMessage
+    
+    try:
+        conversation = db.query(ChatConversation).filter(
+            ChatConversation.id == conversation_id,
+            ChatConversation.user_id == current_user.id
+        ).first()
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Get messages for this conversation
+        messages = db.query(ChatMessage).filter(
+            ChatMessage.conversation_id == conversation_id
+        ).order_by(ChatMessage.created_at.asc()).all()
+        
+        message_responses = []
+        for msg in messages:
+            message_responses.append(MessageResponse(
+                id=msg.id,
+                conversation_id=msg.conversation_id,
+                content=msg.content,
+                message_type=msg.message_type,
+                format=msg.format_type,
+                context=DiagnosticContext(**msg.context_data) if msg.context_data else None,
+                suggestions=msg.suggestions,
+                created_at=msg.created_at
+            ))
+        
+        return ConversationResponse(
+            id=conversation.id,
+            user_id=conversation.user_id,
+            vehicle_id=conversation.vehicle_id,
+            title=conversation.title,
+            context=DiagnosticContext(**conversation.context_data) if conversation.context_data else None,
+            created_at=conversation.created_at,
+            updated_at=conversation.updated_at,
+            messages=message_responses
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get conversation error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get conversation")
+
+@router.post("/chat/conversations/{conversation_id}/messages", response_model=MessageResponse)
+async def save_message(conversation_id: int, message: MessageCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Save a message to a conversation"""
+    from db.models import ChatConversation, ChatMessage
+    
+    try:
+        # Verify conversation exists and belongs to user
+        conversation = db.query(ChatConversation).filter(
+            ChatConversation.id == conversation_id,
+            ChatConversation.user_id == current_user.id
+        ).first()
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Create message
+        db_message = ChatMessage(
+            conversation_id=conversation_id,
+            content=message.content,
+            message_type=message.message_type,
+            format_type=message.format,
+            context_data=message.context.dict() if message.context else None,
+            suggestions=message.suggestions
+        )
+        
+        db.add(db_message)
+        
+        # Update conversation updated_at timestamp
+        conversation.updated_at = func.now()
+        
+        db.commit()
+        db.refresh(db_message)
+        
+        return MessageResponse(
+            id=db_message.id,
+            conversation_id=db_message.conversation_id,
+            content=db_message.content,
+            message_type=db_message.message_type,
+            format=db_message.format_type,
+            context=DiagnosticContext(**db_message.context_data) if db_message.context_data else None,
+            suggestions=db_message.suggestions,
+            created_at=db_message.created_at
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Save message error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save message")
+
+@router.delete("/chat/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Delete a conversation and all its messages"""
+    from db.models import ChatConversation
+    
+    try:
+        conversation = db.query(ChatConversation).filter(
+            ChatConversation.id == conversation_id,
+            ChatConversation.user_id == current_user.id
+        ).first()
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        db.delete(conversation)
+        db.commit()
+        
+        return {"message": "Conversation deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete conversation error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete conversation")
+
+@router.patch("/chat/conversations/{conversation_id}", response_model=ConversationResponse)
+async def update_conversation(conversation_id: int, updates: ConversationUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Update a conversation (title, experience level)"""
+    from db.models import ChatConversation
+    
+    try:
+        conversation = db.query(ChatConversation).filter(
+            ChatConversation.id == conversation_id,
+            ChatConversation.user_id == current_user.id
+        ).first()
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Update fields if provided
+        if updates.title is not None:
+            conversation.title = updates.title
+        
+        conversation.updated_at = func.now()
+        
+        db.commit()
+        db.refresh(conversation)
+        
+        return ConversationResponse(
+            id=conversation.id,
+            user_id=conversation.user_id,
+            vehicle_id=conversation.vehicle_id,
+            title=conversation.title,
+            context=DiagnosticContext(**conversation.context_data) if conversation.context_data else None,
+            created_at=conversation.created_at,
+            updated_at=conversation.updated_at
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update conversation error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update conversation")
+
+@router.post("/chat/diagnostic")
+async def diagnostic_orchestrated_chat(
+    request: ChatRequest, 
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    """Enhanced diagnostic endpoint using the orchestrator"""
+    
+    try:
+        # Generate unique session ID
+        session_id = str(uuid.uuid4())
+        
+        # Create orchestrator instance
+        orchestrator = DiagnosticOrchestrator(
+            session_id=session_id,
+            db_session=db,
+            user_id=current_user.id
+        )
+        
+        # Get primary vehicle for context
+        from db.models import UserVehicle
+        primary_vehicle = db.query(UserVehicle).filter(
+            UserVehicle.user_id == current_user.id,
+            UserVehicle.is_primary == True
+        ).first()
+        
+        # Build vehicle context
+        vehicle_context = None
+        if primary_vehicle:
+            vehicle_context = {
+                "vin": primary_vehicle.vin,
+                "make": primary_vehicle.make,
+                "model": primary_vehicle.model,
+                "year": primary_vehicle.year,
+                "dtc_codes": [],
+                "sensor_data": {}
+            }
+        
+        # Use context from request if provided
+        if request.context:
+            if vehicle_context:
+                # Merge request context with vehicle context
+                if request.context.dtc_codes:
+                    vehicle_context["dtc_codes"] = request.context.dtc_codes
+                if request.context.sensor_data:
+                    vehicle_context["sensor_data"] = request.context.sensor_data
+                if request.context.vin:
+                    vehicle_context["vin"] = request.context.vin
+            else:
+                # Use request context directly
+                vehicle_context = {
+                    "vin": request.context.vin,
+                    "dtc_codes": request.context.dtc_codes or [],
+                    "sensor_data": request.context.sensor_data or {},
+                    "vehicle_info": request.context.vehicle_info
+                }
+                if request.context.vehicle_info:
+                    vehicle_context.update({
+                        "make": request.context.vehicle_info.get("make"),
+                        "model": request.context.vehicle_info.get("model"),
+                        "year": request.context.vehicle_info.get("year")
+                    })
+        
+        # Execute diagnostic workflow
+        diagnostic_response = await orchestrator.diagnose(
+            user_query=request.message,
+            vehicle_context=vehicle_context,
+            live_data=None  # Could be added from request if needed
+        )
+        
+        # Convert orchestrator response to chat response format
+        response_content = f"""# 🔧 Diagnostic Analysis
+        
+## Diagnostic Plan Executed
+        
+"""
+        
+        # Add step results
+        for i, step in enumerate(diagnostic_response.steps):
+            response_content += f"### Step {step['step']}: {step['action']}\n"
+            if step['success']:
+                response_content += "✅ **Completed successfully**\n"
+                if step.get('data'):
+                    # Format key findings
+                    data = step['data']
+                    if 'dtc_codes' in data and data['dtc_codes']:
+                        response_content += f"- **DTC Codes Found:** {', '.join(data['dtc_codes'])}\n"
+                    if 'vehicle_specifications' in data:
+                        specs = data['vehicle_specifications']
+                        response_content += f"- **Vehicle:** {specs.get('year')} {specs.get('make')} {specs.get('model')}\n"
+                    if 'knowledge_base_results' in data:
+                        response_content += f"- **Knowledge Base:** {data['knowledge_base_results'][:200]}...\n"
+            else:
+                response_content += f"❌ **Failed:** {step.get('error', 'Unknown error')}\n"
+            response_content += "\n"
+        
+        # Add questions
+        if diagnostic_response.questions:
+            response_content += "## Follow-up Questions\n"
+            for question in diagnostic_response.questions:
+                response_content += f"- {question}\n"
+            response_content += "\n"
+            
+        # Add recommendations
+        if diagnostic_response.recommendations:
+            response_content += "## Recommendations\n"
+            for rec in diagnostic_response.recommendations:
+                response_content += f"- {rec}\n"
+            response_content += "\n"
+            
+        # Add verification status
+        verification = diagnostic_response.verification
+        response_content += f"## Verification Status\n"
+        response_content += f"- **Status:** {verification.get('status', 'unknown')}\n"
+        response_content += f"- **Confidence:** {diagnostic_response.confidence:.1%}\n"
+        response_content += f"- **Execution Time:** {verification.get('execution_time', 0):.1f}s\n"
+        
+        # Create chat message
+        message = ChatMessage(
+            content=response_content,
+            format="markdown",
+            timestamp=datetime.now(),
+            message_type="diagnostic"
+        )
+        
+        # Build diagnostic data for response
+        diagnostic_data = {}
+        if vehicle_context:
+            diagnostic_data = {
+                "vehicle_info": {
+                    "make": vehicle_context.get("make"),
+                    "model": vehicle_context.get("model"), 
+                    "year": vehicle_context.get("year")
+                },
+                "dtc_codes": vehicle_context.get("dtc_codes", []),
+                "session_id": session_id,
+                "orchestrator_used": True
+            }
+        
+        return ChatResponse(
+            message=message,
+            diagnostic_data=diagnostic_data,
+            suggestions=diagnostic_response.questions[:3] if diagnostic_response.questions else [
+                "Run additional diagnostics",
+                "Check vehicle history", 
+                "Schedule maintenance"
+            ]
+        )
+        
+    except Exception as e:
+        logger.error(f"Diagnostic orchestration error: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        
+        error_message = ChatMessage(
+            content=f"""# ❌ Diagnostic Error
+
+An error occurred during the diagnostic process:
+
+**Error:** {str(e)}
+
+**Suggestions:**
+- Try the regular chat endpoint for basic assistance
+- Ensure your vehicle information is correct
+- Contact support if the issue persists
+
+**Fallback:** You can still use the standard chat features while we resolve this issue.""",
+            format="markdown",
+            timestamp=datetime.now(),
+            message_type="error"
+        )
+        
+        return ChatResponse(message=error_message)
